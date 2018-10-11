@@ -2421,6 +2421,84 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
            (org2blog--blog-property-or :default-tags-sub org2blog/wp-default-tags-subtree)
            ", ")))
 
+
+;;
+;; Media Library
+;; https://codex.wordpress.org/XML-RPC_WordPress_API/Media#wp.getMediaLibrary
+;;
+
+(defun org2blog-get-media-library (filter)
+  (xml-rpc-method-call org2blog-xmlrpc
+                       "wp.getMediaLibrary"
+                       org2blog-blogid
+                       org2blog-username
+                       org2blog-password
+                       filter))
+
+(defun org2blog-find-media-item-by-file-name (file-name library)
+  (find-if
+   (lambda (obj)
+     (string=
+      (car (last (split-string (or (cdr (assoc "file" (cdr (assoc "metadata" obj)))) "*no file metadata*") "/")))
+      (car (last (split-string file-name "/")))))
+   library))
+
+(defun org2blog-find-media-item-by-attachment-id (attachment-id library)
+  (find-if
+   (lambda (obj)
+     (equal (cdr (assoc "attachment_id" obj)) attachment-id))
+   library))
+
+;;
+;; MediaItemSize
+;;
+
+(defun org2blog-media-item-size-file (media-item-size) (cdr (assoc "file" (cdr media-item-size))))
+(defun org2blog-media-item-size-width (media-item-size) (cdr (assoc "width" (cdr media-item-size))))
+(defun org2blog-media-item-size-height (media-item-size) (cdr (assoc "height" (cdr media-item-size))))
+
+(defun org2blog-select-image-thumbnail-file-name (media-item-info img-width img-height)
+  (org2blog-media-item-size-file (org2blog-select-image-thumbnail-size media-item-info img-width img-height)))
+
+(defun org2blog-select-image-thumbnail-size (media-item-info img-width img-height)
+  (let* ((media-metadata (cdr (assoc "metadata" media-item-info)))
+         (media-sizes (cdr (assoc "sizes" media-metadata)))
+         (selectable-sizes '("medium" "medium_large" "large"))
+         (img-w-or-h (cond ((numberp img-width) img-width) ((numberp img-height) img-height)))
+         (fun-item-w-or-h (cond ((numberp img-width) #'org2blog-media-item-size-width) ((numberp img-height) #'org2blog-media-item-size-height))))
+
+    (cond
+     ((not org2blog/wp-image-thumbnails)
+      nil)
+     ((null img-w-or-h)
+      ;; img has no width= or h= attribute
+      (assoc org2blog/wp-image-thumbnail-size media-sizes))
+     ;; img has width= or height= attribute
+     (t
+      (let (best-w-or-h best-info)
+        (while media-sizes
+          (let* ((size-info (car media-sizes))
+                 (size-name (car size-info))
+                 (w-or-h (funcall fun-item-w-or-h size-info)))
+            (if (and (numberp w-or-h)
+                     (member size-name selectable-sizes)
+                     (or (null best-w-or-h)
+                         (and (< best-w-or-h img-w-or-h) (> w-or-h best-w-or-h))
+                         (and (>= best-w-or-h img-w-or-h) (< w-or-h best-w-or-h) (>= w-or-h img-w-or-h))))
+                (progn
+                  (setq best-w-or-h w-or-h)
+                  (setq best-info size-info)
+                  )))
+          (setq media-sizes (cdr media-sizes)))
+        best-info)))))
+;; test: (org2blog-select-image-thumbnail-size '(("attachment_id" . "7661") ("date_created_gmt" :datetime (23486 8639)) ("parent" . 0) ("link" . "http://example.com/blog/wp-content/uploads/2018-09-27-image-size-test-3.jpg") ("title" . "2018-09-27-image-size-test.jpg") ("caption") ("description") ("metadata" ("width" . 2000) ("height" . 1125) ("file" . "2018-09-27-image-size-test-3.jpg") ("sizes" ("thumbnail" ("file" . "2018-09-27-image-size-test-3-150x150.jpg") ("width" . 150) ("height" . 150) ("mime-type" . "image/jpeg")) ("medium" ("file" . "2018-09-27-image-size-test-3-300x169.jpg") ("width" . 300) ("height" . 169) ("mime-type" . "image/jpeg")) ("medium_large" ("file" . "2018-09-27-image-size-test-3-768x432.jpg") ("width" . 768) ("height" . 432) ("mime-type" . "image/jpeg")) ("large" ("file" . "2018-09-27-image-size-test-3-1024x576.jpg") ("width" . 1024) ("height" . 576) ("mime-type" . "image/jpeg")) ("post-thumbnail" ("file" . "2018-09-27-image-size-test-3-624x351.jpg") ("width" . 624) ("height" . 351) ("mime-type" . "image/jpeg"))) ("image_meta" ("aperture" . "0") ("credit") ("camera") ("caption") ("created_timestamp" . "0") ("copyright") ("focal_length" . "0") ("iso" . "0") ("shutter_speed" . "0") ("title") ("orientation" . "0") ("keywords"))) ("type" . "image/jpeg") ("thumbnail" . "http://example.com/blog/wp-content/uploads/2018-09-27-image-size-test-3-150x150.jpg"))  nil 170)
+
+(defcustom org2blog/wp-image-thumbnail-size-attr-complete t
+  "Complete image size attributes(width=, height=)"
+  :group 'org2blog/wp
+  :type 'boolean)
+
+
 (defun org2blog--upload-files-replace-urls (text)
   "Upload files and replace their links in TEXT."
   (catch 'return
@@ -2429,7 +2507,10 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
       (throw 'return text))
     (message (format "%s" (concat "Work to do: uploading images.")))
     (let ((file-regexp "<img src=\"\\(.*?\\)\"")
-          file-all-urls file-name file-web-url beg file-thumbnail-name upload-ret)
+          file-all-urls file-name file-web-url beg file-thumbnail-name upload-ret
+          file-media-item file-attachment-id
+          (library (org2blog-get-media-library (list (cons "parent_id" (or (org2blog--bprop "POSTID") (org2blog--bprop "POST_ID")))))) ;; fetch already uploaded files
+          (invalid-file-thumbnail-name "-"))
       (save-excursion
         (while (string-match file-regexp text beg)
           (setq file-name
@@ -2444,6 +2525,11 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
                                        (string-match org-plain-link-re file-name)
                                        (string-match "^.*#" file-name)
                                        (string-equal (file-name-nondirectory file-name) ""))))
+
+            ;; set file-web-url, file-thumbnail-name, file-media-item, file-attachment-id
+            (setq file-web-url nil file-thumbnail-name nil file-media-item nil file-attachment-id nil)
+            ;; First, find the media item by attachment-id previous upload.
+            ;; Because the file name in the media library may be different from the file-name.
             (goto-char (point-min))
             (if (re-search-forward (concat "^.*# "
                                            (regexp-quote file-name)
@@ -2457,8 +2543,27 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
                   (setq file-web-url (car url-thumb-parts))
                   ;; Get the name. The ‘cdr’ is either a list or nil so use
                   ;; ‘nth’: it will give the name or nil if there's nothing.
-                  (setq file-thumbnail-name (nth 1 url-thumb-parts)))
+                  (setq file-thumbnail-name (nth 1 url-thumb-parts))
+                  (if (string= file-thumbnail-name invalid-file-thumbnail-name) (setq file-thumbnail-name nil))
+                  ;; Get the attachment-id or nil.
+                  (setq file-attachment-id (nth 2 url-thumb-parts))
+                  ;; Find the media-item from media library.
+                  (setq file-media-item (org2blog-find-media-item-by-attachment-id file-attachment-id library))
+                  ;;(if file-media-item  (message "Found by attachment-id %s %s" file-attachment-id file-thumbnail-name))
+                  ))
 
+            ;; Find the media item by file-name
+            (when (not file-media-item)
+              (when
+                  (setq file-media-item (org2blog-find-media-item-by-file-name file-name library))
+                ;;(message "Found by file-name %s %s" file-attachment-id file-thumbnail-name)
+                (setq file-attachment-id (cdr (assoc "attachment_id" file-media-item)))
+                (setq file-web-url (cdr (assoc "link" file-media-item)))
+                (setq file-thumbnail-name
+                      (org2blog-select-image-thumbnail-file-name file-media-item nil nil))))
+
+            ;; Upload file
+            (when (not file-media-item)
               ;; Return alist with id, file, url, type
               (condition-case-unless-debug err
                   (setq upload-ret (metaweblog-upload-file
@@ -2475,6 +2580,8 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
                  (throw 'return nil)))
               (setq file-web-url
                     (cdr (assoc "url" upload-ret)))
+              (setq file-attachment-id
+                    (cdr (assoc "id" upload-ret)))
 
               ;; Link to the thumbnail image?
               (if (not org2blog/wp-image-thumbnails)
@@ -2492,20 +2599,22 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
                                              org2blog-password
                                              attachment-id)))
 
+                  ;; cache media-item-info to library
+                  (push media-item-info library)
+                  (setq file-media-item media-item-info)
+
                   ;; media-item-info -> metadata -> sizes -> medium -> file == basename-300x???.jpg
                   ;; Get the basename of the requested size thumb in ‘medium-file-name’.
-                  (let ((media-metadata (cdr (assoc "metadata" media-item-info))))
-                    (setq file-thumbnail-name
-                          (cdr
-                           (assoc "file"
-                                  (cdr (assoc org2blog/wp-image-thumbnail-size
-                                              (cdr (assoc "sizes" media-metadata))))))))))
+                  (setq file-thumbnail-name
+                        (org2blog-select-image-thumbnail-file-name media-item-info nil nil))))
+              ;;(if file-media-item  (message "New file uploaded %s %s" file-attachment-id file-thumbnail-name))
               (goto-char (point-max))
               (org2blog--new-line-no-indent)
               (insert (concat "# " file-name " " file-web-url
                               (if file-thumbnail-name
                                   (concat  " " file-thumbnail-name)
-                                ""))))
+                                invalid-file-thumbnail-name)
+                              " " file-attachment-id)))
 
             ;; Retrieve ‘file-web-url’ either via the API or from the document.
             ;; Add to the list of replacements.
@@ -2515,7 +2624,8 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
                   (append file-all-urls
                           (list (list file-name
                                       file-web-url
-                                      file-thumbnail-name))))))
+                                      file-thumbnail-name
+                                      file-media-item))))))
 
         (dolist (file file-all-urls)
 
@@ -2537,21 +2647,49 @@ See ‘org2blog/wp-buffer-subtree-template’ for details about how it is used."
             (let*
                 ((file-web-url (nth 1 file))
                  (file-thumbnail-name (nth 2 file))
-                 ;; Find the position of the last / measured from the end.
-                 (idx (string-match-p (regexp-quote "/")
-                                      (concat (reverse (string-to-list file-web-url)))))
-                 ;; Chop off just the filename, replace with thumbnail name.
-                 (thumbnail-url (concat (substring file-web-url 0 (- idx)) file-thumbnail-name)))
+                 (file-media-item (nth 3 file)))
 
               ;; Replace: <img src="file://./img/blabla.png" alt="volume_cutting.png" />.
               ;; After "sample.png" we use non-greedy matching until “/>”.
-              (setq text (replace-regexp-in-string
-                          (concat "<img src=\"\\(file://\\)?"
-                                  (regexp-quote (car file))
-                                  "\"\\(.*?\\)/>")
-                          (concat "<a href=\"" file-web-url "\">"
-                                  "<img src=\"" thumbnail-url "\"\\2/></a>")
-                          text))))))
+
+              (let ((img-regexp (concat "<img src=\"\\(file://\\)?" (regexp-quote (car file)) "\"\\(.*?\\) */>"))
+                    (img-width-regexp "[^>]* width *= *\" *\\(\\([0-9]+\\) *\\(px\\)?\\|.*?\\) *\"") ;;@todo case: <img src="a.jpg" alt=">" width="100">
+                    (img-height-regexp "[^>]* height *= *\" *\\(\\([0-9]+\\) *\\(px\\)?\\|.*?\\) *\"") ;;@todo case: <img src="a.jpg" alt=">" height="100">
+                    )
+                (setq text
+                      (with-temp-buffer
+                        (insert text)
+                        (goto-char (point-min))
+                        (while (re-search-forward img-regexp nil t)
+
+                          (let* ((img-str (match-string 0))
+                                 ;; img-width and img-height are either nil(unspecified) or number(pixels) or string(ex: 100% or other invalid forms)
+                                 (img-width (save-match-data (if (string-match img-width-regexp img-str) (if (match-string 2 img-str) (string-to-number (match-string 2 img-str)) (match-string 1 img-str)))))
+                                 (img-height (save-match-data (if (string-match img-height-regexp img-str) (if (match-string 2 img-str) (string-to-number (match-string 2 img-str)) (match-string 1 img-str)))))
+                                 (thumbnail-size (org2blog-select-image-thumbnail-size file-media-item img-width img-height))
+                                 (thumbnail-name (or (org2blog-media-item-size-file thumbnail-size)
+                                                     file-thumbnail-name))
+                                 ;; find the position of the last / measured from the end
+                                 (idx (string-match-p (regexp-quote "/")
+                                                      (concat (reverse (string-to-list file-web-url)))))
+                                 ;; chop off just the filename, replace with thumbnail name
+                                 (thumbnail-url (concat (substring file-web-url 0 (- idx)) thumbnail-name))
+                                 ;; complete img width=, height= attributes
+                                 (thumbnail-width (org2blog-media-item-size-width thumbnail-size))
+                                 (thumbnail-height (org2blog-media-item-size-height thumbnail-size))
+                                 (img-add-attrs
+                                  (cond
+                                   ((not org2blog/wp-image-thumbnail-size-attr-complete) "")
+                                   ((or (not (numberp thumbnail-width)) (not (numberp thumbnail-height))) "")
+                                   ((and (null img-width) (null img-height)) (format " width=\"%d\" height=\"%d\"" thumbnail-width thumbnail-height))
+                                   ((and (numberp img-width) (null img-height)) (format " height=\"%d\"" (/ (* thumbnail-height img-width) thumbnail-width)))
+                                   ((and (null img-width) (numberp img-height)) (format " width=\"%d\"" (/ (* thumbnail-width img-height) thumbnail-height)))
+                                   (t ""))))
+
+                            (replace-match
+                             (concat "<a href=\"" file-web-url "\">"
+                                     "<img src=\"" thumbnail-url "\"\\2" img-add-attrs " /></a>"))))
+                        (buffer-string))))))))
       text)))
 
 (defun org2blog--get-post-or-page (post-or-page-id)
