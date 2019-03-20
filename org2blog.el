@@ -1595,6 +1595,9 @@ Destination is either a symbol ‘buffer’ or a ‘subtree’."
               (when to-post (org-entry-put (point) "BLOG" org2blog-blog-key))
               (org-entry-put (point) "POSTID" post-id)))
           (org2blog--save-details post post-id publish from-subtree)
+
+          (org2blog-update-post-thumbnail)
+
           (let* ((did (format
                        (if publish
                            "Published your %s: “%s”. Its ID is “%s”. "
@@ -2997,6 +3000,70 @@ and munge it a little to make it suitable to use with the
          (timestamp (concat timestamp-without-timezone
                             timezone-utf-offset)))
     timestamp))
+
+
+;;; update post thumbnail (eyecatch image)
+
+(defun org2blog-wp-get-post-thumbnail (post-id)
+  (cdr
+   (assoc
+    "post_thumbnail"
+    (xml-rpc-method-call
+     org2blog-xmlrpc
+     "wp.getPost"
+     org2blog-blogid
+     org2blog-username
+     org2blog-password
+     post-id
+     '("post_thumbnail")))))
+
+(defun org2blog-wp-get-post-thumbnail-file (post-id)
+  (cdr (assoc "file" (cdr (assoc "metadata" (org2blog-wp-get-post-thumbnail post-id))))))
+
+(defun org2blog-nondir (file)
+  " a/b/c => c "
+  (if (stringp file) (car (last (split-string file "/")))))
+
+(defun org2blog-wp-edit-post-thumbnail (post-id post-thumbnail-attachment-id)
+  (xml-rpc-method-call
+     org2blog-xmlrpc
+     "wp.editPost"
+     org2blog-blogid
+     org2blog-username
+     org2blog-password
+     post-id
+     `(("post_thumbnail" . ,post-thumbnail-attachment-id))))
+
+(defun org2blog-update-post-thumbnail ()
+  (let* ((post-id (or (org2blog--bprop "POSTID") (org2blog--bprop "POST_ID")))
+         (curr-info (org2blog-wp-get-post-thumbnail post-id))
+         ;;(curr-file (or (cdr (assoc "file" (cdr (assoc "metadata" curr-info)))) ""))
+         (curr-title (or (cdr (assoc "title" curr-info)) ""))
+         (new-file (org2blog--bprop "POST_THUMBNAIL"))) ;;string or nil
+
+    (if (and (stringp new-file) (> (length new-file) 0) (not (file-exists-p new-file)))
+        (message "POST_THUMBNAIL %s not exists." new-file)
+
+      (when (and (stringp new-file) ;; new-file==nil(POST_THUMBNAIL option is not specified) means keep curr-info
+                 (not (string= (org2blog-nondir curr-title) (org2blog-nondir new-file))))
+        ;; delete curr-file @todo
+        ;; upload new-file
+        (let ((attachment-id (if (> (length new-file) 0)
+                                 (cdr (assoc "id"
+                                             (metaweblog-upload-file
+                                              org2blog-xmlrpc
+                                              org2blog-username
+                                              org2blog-password
+                                              org2blog-blogid
+                                              (get-file-properties new-file))))
+                               ""))) ;;"" means remove post thumbnail
+          ;; set new-file to post-thumbnail
+          (if (not (null attachment-id))
+              (org2blog-wp-edit-post-thumbnail post-id attachment-id)))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 ;;; Mode
 
